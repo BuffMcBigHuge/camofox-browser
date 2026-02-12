@@ -396,15 +396,32 @@ async function getAriaSnapshot(page) {
 function refToLocator(page, ref, refs) {
   const info = refs.get(ref);
   if (!info) return null;
-  
+
   const { role, name, nth } = info;
   let locator = page.getByRole(role, name ? { name } : undefined);
-  
+
   // Always use .nth() to disambiguate duplicate role+name combinations
   // This avoids "strict mode violation" when multiple elements match
   locator = locator.nth(nth);
-  
+
   return locator;
+}
+
+async function trySetInputFiles(locator, filePath) {
+  // Allows our existing "type" tool to work for <input type="file">.
+  // If the target is a file input, we call Playwright's setInputFiles instead of fill().
+  try {
+    const tag = await locator.evaluate((el) => (el && el.tagName ? el.tagName.toLowerCase() : ''));
+    if (tag !== 'input') return false;
+    const type = (await locator.getAttribute('type')) || '';
+    if (type.toLowerCase() !== 'file') return false;
+
+    await locator.setInputFiles(filePath);
+    return true;
+  } catch (e) {
+    // If detection fails, fall back to normal typing.
+    return false;
+  }
 }
 
 // Health check
@@ -699,9 +716,17 @@ app.post('/tabs/:tabId/type', async (req, res) => {
       if (ref) {
         const locator = refToLocator(tabState.page, ref, tabState.refs);
         if (!locator) throw new Error(`Unknown ref: ${ref}`);
-        await locator.fill(text, { timeout: 10000 });
+
+        const didUpload = await trySetInputFiles(locator, text);
+        if (!didUpload) {
+          await locator.fill(text, { timeout: 10000 });
+        }
       } else {
-        await tabState.page.fill(selector, text, { timeout: 10000 });
+        const locator = tabState.page.locator(selector).first();
+        const didUpload = await trySetInputFiles(locator, text);
+        if (!didUpload) {
+          await locator.fill(text, { timeout: 10000 });
+        }
       }
     });
     
@@ -1249,15 +1274,23 @@ app.post('/act', async (req, res) => {
           if (typeof text !== 'string') {
             throw new Error('text is required');
           }
-          
+
           if (ref) {
             const locator = refToLocator(tabState.page, ref, tabState.refs);
             if (!locator) throw new Error(`Unknown ref: ${ref}`);
-            await locator.fill(text, { timeout: 10000 });
-            if (submit) await tabState.page.keyboard.press('Enter');
+
+            const didUpload = await trySetInputFiles(locator, text);
+            if (!didUpload) {
+              await locator.fill(text, { timeout: 10000 });
+              if (submit) await tabState.page.keyboard.press('Enter');
+            }
           } else {
-            await tabState.page.fill(selector, text, { timeout: 10000 });
-            if (submit) await tabState.page.keyboard.press('Enter');
+            const locator = tabState.page.locator(selector).first();
+            const didUpload = await trySetInputFiles(locator, text);
+            if (!didUpload) {
+              await locator.fill(text, { timeout: 10000 });
+              if (submit) await tabState.page.keyboard.press('Enter');
+            }
           }
           return { ok: true, targetId };
         }
